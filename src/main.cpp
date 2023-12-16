@@ -56,24 +56,6 @@ hci_dump_t logger = {
     .log_message = log_message
 };
 
-// enum {
-//     HCI_OPCODE_HCI_SET_EVENT_FILTER = HCI_OPCODE(OGF_CONTROLLER_BASEBAND, 0x05),
-// };
-
-// // 1: Filter type: Connection Setup (0x02)
-// // 1: Filter condition type: Allow connection from Class of Devices (0x01)
-// // 3: COD
-// // 3: COD Mask
-// // 1: Autoaccept: 0x011 (no auto-accept), 0x02 (no auto-accept with role disabled)
-// //    0x03 (no auto-accept with role enabled)
-// const hci_cmd_t hci_set_event_filter_connection_cod = {HCI_OPCODE_HCI_SET_EVENT_FILTER, "11331"};
-
-// // 1: Filter type: Inquiry (0x01)
-// // 1: Filter condition type: Allow connection from Class of Devices (0x01)
-// // 3: COD
-// // 3: COD Mask
-// const hci_cmd_t hci_set_event_filter_inquiry_cod = {HCI_OPCODE_HCI_SET_EVENT_FILTER, "1133"};
-
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size);
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
@@ -95,15 +77,6 @@ static void stop_scan(void){
     info1("Stopping inquiry scan..\n");
     gap_inquiry_stop();
 }
-
-// static uint8_t setup_set_event_filter(void) {
-//     // Filter out inquiry results before we start the inquiry
-//     return hci_send_cmd(&hci_set_event_filter_inquiry_cod, 0x01, 0x01, BT_COD_MAJOR_PERIPHERAL, BT_COD_MAJOR_MASK);
-// }
-
-// static uint8_t setup_write_simple_pairing_mode(void) {
-//     return hci_send_cmd(&hci_write_simple_pairing_mode, true);
-// }
 
 static device* get_device_from_addr(bd_addr_t addr) {
     auto iterator = std::find_if(devices.begin(), devices.end(), [&addr](device *dev){
@@ -138,13 +111,6 @@ static void continue_remote_names(void){
     start_scan();
 }
 
-/* @section Bluetooth Logic 
- *
- * @text The Bluetooth logic is implemented as a state machine within the packet
- * handler. In this example, the following states are passed sequentially:
- * INIT, and ACTIVE.
- */
-
 static void make_acl_link(bd_addr_t remote){
     link_key_t key;
     link_key_type_t key_type;
@@ -171,7 +137,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
     uint8_t event = hci_event_packet_get_type(packet);
     uint8_t subevent;
-    //printf("Packet size %d - ", size);
 
     switch(state){
         case INIT:
@@ -180,15 +145,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 state = ACTIVE;
             }
             break;
-        // @text In ACTIVE, the following events are processed:
-        //  - GAP Inquiry result event: BTstack provides a unified inquiry result that contain
-        //    Class of Device (CoD), page scan mode, clock offset. RSSI and name (from EIR) are optional.
-        //  - Inquiry complete event: the remote name is requested for devices without a fetched 
-        //    name. The state of a remote name can be one of the following: 
-        //    REMOTE_NAME_REQUEST, REMOTE_NAME_INQUIRED, or REMOTE_NAME_FETCHED.
-        //  - Remote name request complete event: the remote name is stored in the table and the 
-        //    state is updated to REMOTE_NAME_FETCHED. The query of remote names is continued.
-        // 
         case ACTIVE:
             switch(event){
                 case HCI_EVENT_CONNECTION_REQUEST:
@@ -235,6 +191,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                             return;
                         }
                     }
+                    if(has_more_remote_name_requests()) {
+                        do_next_remote_name_request();
+                    }
                     debug1("No device handled packet:\n");
                     dump_packet(packet, size);
                     break;
@@ -244,132 +203,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         default:
             break;
     }
-
-    // UNUSED(channel);
-
-    // switch (packet_type) {
-    //     case HCI_EVENT_PACKET:
-    //         switch (hci_event_packet_get_type(packet)) {
-    //             case BTSTACK_EVENT_STATE:
-    //                 if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
-    //                 if (inquiry_for_peer) {
-    //                     start_scan();
-    //                 }
-    //                 else {
-    //                     make_acl_link(peer_addr);
-    //                 }
-    //                 break;
-
-    //             case GAP_EVENT_INQUIRY_RESULT:
-    //                 gap_event_inquiry_result_get_bd_addr(packet, peer_addr);
-    //                 stop_scan();
-    //                 if (gap_event_inquiry_result_get_name_available(packet)) {
-    //                     char name_buffer[240];
-    //                     size_t name_len;
-    //                     if (gap_event_inquiry_result_get_name_len(packet) < sizeof(name_buffer)) {
-    //                         name_len = gap_event_inquiry_result_get_name_len(packet);
-    //                     }
-    //                     else {
-    //                         name_len = sizeof(name_buffer - 1);
-    //                     }
-    //                     memcpy(name_buffer, gap_event_inquiry_result_get_name(packet), name_len);
-    //                     name_buffer[name_len] = 0;
-    //                     printf("Found %s with name %s\n", bd_addr_to_str(peer_addr), name_buffer);
-    //                 }
-    //                 else {
-    //                     printf("Found %s without name, requesting name\n", bd_addr_to_str(peer_addr));
-    //                     gap_remote_name_request(peer_addr, gap_event_inquiry_result_get_page_scan_repetition_mode(packet), \
-    //                                             gap_event_inquiry_result_get_clock_offset(packet) | 0x8000);
-    //                 }
-    //                 break;
-                    
-    //             case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
-    //                 if (ERROR_CODE_SUCCESS == hci_event_remote_name_request_complete_get_status(packet)) {
-    //                     printf("The name of %s is %s\n", bd_addr_to_str(peer_addr), hci_event_remote_name_request_complete_get_remote_name(packet));
-    //                 }
-    //                 else {
-    //                     printf("Error %s when requesting name of %s\n", bt_strerror(hci_event_remote_name_request_complete_get_status(packet)), bd_addr_to_str(peer_addr));
-    //                 }
-    //                 make_acl_link(peer_addr);
-    //                 break;
-    //             case GAP_EVENT_INQUIRY_COMPLETE:
-    //                 printf("Inquiry complete status %s\n", bt_strerror(gap_event_inquiry_complete_get_status(packet)));
-    //                 break;
-
-    //             case HCI_EVENT_CONNECTION_COMPLETE:
-    //                 if (ERROR_CODE_SUCCESS == hci_event_connection_complete_get_status(packet)) {
-    //                     link_handle = hci_event_connection_complete_get_connection_handle(packet);
-    //                     printf("ACL link 0x%x established.\n", link_handle);
-    //                     if (security_level != gap_security_level(link_handle)) {
-    //                         printf("Set security level to %d\n", security_level);
-    //                         gap_request_security_level(link_handle, security_level);
-    //                     }
-    //                 }
-    //                 else {
-    //                     printf("ACL link failed %s\n", bt_strerror(hci_event_connection_complete_get_status(packet)));
-    //                 }
-    //                 break;
-
-    //             case HCI_EVENT_IO_CAPABILITY_RESPONSE:
-    //                 printf("Peer io_capability %d oob_data_present %d authentication_requirements %d\n", \
-    //                     hci_event_io_capability_response_get_io_capability(packet), \
-    //                     hci_event_io_capability_response_get_oob_data_present(packet), \
-    //                     hci_event_io_capability_response_get_authentication_requirements(packet));
-    //                 break;
-
-    //             case GAP_EVENT_PAIRING_COMPLETE:
-    //                 if (ERROR_CODE_SUCCESS == gap_event_pairing_complete_get_status(packet)) {
-    //                     printf("Pairing completed\n");
-    //                 }
-    //                 else {
-    //                     printf("Pairing failed %s\n", bt_strerror(gap_event_pairing_complete_get_status(packet)));
-    //                 }
-    //                 break;
-
-    //             case GAP_EVENT_SECURITY_LEVEL:
-    //                 printf("Link handle 0x%x security level %d\n", \
-    //                     gap_event_security_level_get_handle(packet), \
-    //                     gap_event_security_level_get_security_level(packet));
-    //                 break;
-
-    //             case HCI_EVENT_AUTHENTICATION_COMPLETE:
-    //                 printf("Link handle 0x%x authentication status %s\n", \
-    //                     hci_event_authentication_complete_get_connection_handle(packet), \
-    //                     bt_strerror(hci_event_authentication_complete_get_status(packet)));
-    //                 break;
-
-    //             case HCI_EVENT_PIN_CODE_REQUEST:
-    //                 // inform about pin code request
-    //                 printf("LMP Pairing - pin code request - using '0000'\n");
-    //                 hci_event_pin_code_request_get_bd_addr(packet, peer_addr);
-    //                 gap_pin_code_response(peer_addr, "0000");
-    //                 break;
-
-    //             case HCI_EVENT_USER_CONFIRMATION_REQUEST:
-    //                 // inform about user confirmation request
-    //                 printf("SSP User Confirmation Request with numeric value '%06"PRIu32"'\n", little_endian_read_32(packet, 8));
-    //                 printf("SSP User Confirmation Auto accept\n");
-    //                 break;
-
-    //             default:
-    //                 if (dump_hci_event) {
-    //                     printf("%s\n", bt_strevent(hci_event_packet_get_type(packet)));
-    //                 }
-    //                 break;
-	// 		}
-    //         break;
-
-    //     default:
-    //         printf("%s\n", bt_strpacket(packet_type));
-    //         break;
-	// }
-
 }
-
-/* @text For more details on discovering remote devices, please see
- * Section on [GAP](../profiles/#sec:GAPdiscoverRemoteDevices).
- */
-
 
 void core1_main() {
     multicore_lockout_victim_init();
@@ -432,7 +266,7 @@ int main() {
         if(xbox_controller != devices.end() && state == ACTIVE) {
             info1("Found new xbox controller, attempting to bond!\n");
             info("Device %s\nName %.*s\n", bd_addr_to_str((*xbox_controller)->address().address), (*xbox_controller)->get_name().size(), (*xbox_controller)->get_name().data());
-            uint8_t status = gap_connect((*xbox_controller)->address().address, BD_ADDR_TYPE_ACL);
+            uint8_t status = gap_dedicated_bonding((*xbox_controller)->address().address, 0);
             info("Connect status %s\n", bt_strerror(status));
         }
         sleep_ms(1000);
