@@ -13,3 +13,4 @@ const char* bt_strhidsubevent(uint8_t subevent);
 const char* bt_striocap(uint8_t io_capability);
 const char* bt_strauthreq(uint8_t auth_reqs);
 const char* bt_strpsm(uint16_t psm);
+const char* bt_strattribute(uint16_t attribute);
