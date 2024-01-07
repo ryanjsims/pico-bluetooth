@@ -9,6 +9,9 @@
 #include <btstack_hid_parser.h>
 #include <gap.h>
 #include <l2cap.h>
+#include <bluetooth_sdp.h>
+#include <classic/sdp_client.h>
+#include <functional>
 
 device::device(std::span<uint8_t> packet)
     : m_name_state(device::name::not_fetched)
@@ -17,6 +20,8 @@ device::device(std::span<uint8_t> packet)
     , m_name_sv{}
     , m_name_retries(3)
     , m_handle(0xFFFF)
+    , m_hid_descriptor(nullptr)
+    , m_hid_descriptor_len(0)
 {
     #if LOG_LEVEL <= LOG_LEVEL_DEBUG
     debug1("Got packet:\n");
@@ -155,6 +160,16 @@ bool device::handle_packet(uint8_t packet_type, uint16_t channel, std::span<uint
     }
 }
 
+device *queried_device = nullptr;
+
+static void handle_sdp_packet(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+    if(queried_device == nullptr) {
+        error1("No device to handle SDP query result!\n");
+        return;
+    }
+    queried_device->handle_packet(packet_type, channel, {packet, size});
+}
+
 bool device::on_hci_event_packet(uint16_t channel, std::span<uint8_t> packet) {
     uint8_t event = hci_event_packet_get_type(packet.data());
     bd_addr_t addr;
@@ -179,6 +194,28 @@ bool device::on_hci_event_packet(uint16_t channel, std::span<uint8_t> packet) {
         }
         l2cap_accept_connection(channel);
         return true;
+    case L2CAP_EVENT_CHANNEL_OPENED:{
+        if(l2cap_event_channel_opened_get_handle(packet.data()) != m_handle) {
+            break;
+        }
+        uint8_t status = L2CAP_LOCAL_CID_DOES_NOT_EXIST;
+        switch(l2cap_event_channel_opened_get_psm(packet.data())) {
+        case PSM_HID_CONTROL:
+            status = l2cap_request_can_send_now_event(m_control_cid);
+            break;
+        default:
+            break;
+        }
+        return status == ERROR_CODE_SUCCESS;
+    }
+    case L2CAP_EVENT_CAN_SEND_NOW:
+        if(l2cap_event_can_send_now_get_local_cid(packet.data()) != m_control_cid || queried_device != nullptr) {
+            break;
+        }
+        queried_device = this;
+        info("Set queried device as %p\n", this);
+        sdp_client_query_uuid16(handle_sdp_packet, (uint8_t *) m_address.address, BLUETOOTH_SERVICE_CLASS_HUMAN_INTERFACE_DEVICE_SERVICE);
+        return true;
     case L2CAP_EVENT_CHANNEL_CLOSED:{
         uint8_t channel = l2cap_event_channel_closed_get_local_cid(packet.data());
         if(channel == m_interrupt_cid) {
@@ -197,8 +234,27 @@ bool device::on_hci_event_packet(uint16_t channel, std::span<uint8_t> packet) {
         m_connection_state = device::connection::none;
         m_handle = 0xFFFF;
         return true;
+    case SDP_EVENT_QUERY_COMPLETE:
+    case SDP_EVENT_QUERY_RFCOMM_SERVICE:
+    case SDP_EVENT_QUERY_ATTRIBUTE_BYTE:
+    case SDP_EVENT_QUERY_ATTRIBUTE_VALUE:
+    case SDP_EVENT_QUERY_SERVICE_RECORD_HANDLE:
+        return on_sdp_event_packet(channel, packet);
     }
     return false;
+}
+
+void dump_controller(controller_state_t state) {
+    printf("Axes: X %5.1f%% Y %5.1f%% Rx %5.1f%% Ry %5.1f%%\tTriggers: L %5.1f%% R %5.1f%%\tHat: %d\tButtons: %03x\r",
+        (float)state.left_axes.x / 655.35f,
+        (float)state.left_axes.y / 655.35f,
+        (float)state.right_axes.x / 655.35f,
+        (float)state.right_axes.y / 655.35f,
+        (float)state.left_trigger / 10.23f,
+        (float)state.right_trigger / 10.23f,
+        (uint8_t)state.hat,
+        state.buttons
+    );
 }
 
 bool device::on_l2cap_data_packet(uint16_t channel, std::span<uint8_t> packet) {
@@ -224,15 +280,112 @@ bool device::on_l2cap_data_packet(uint16_t channel, std::span<uint8_t> packet) {
     }
     //btstack_hid_parser_t parser;
     // parse hid stuff here...
-    if(packet.size() > 3) {
-        uint16_t i = 0;
-        for(i; i < packet.size(); i++) {
-            info_cont("0x%02x ", packet[i]);
-            if(i % 4 == 3) {
-                info_cont1(" ");
+    uint8_t report_id = packet[1];
+    switch(report_id) {
+    case 0x01: // Xbox Controller Joysticks/Triggers/Buttons report
+        m_input.left_axes.x = little_endian_read_16(packet.data(), 2);
+        m_input.left_axes.y = little_endian_read_16(packet.data(), 4);
+        m_input.right_axes.x = little_endian_read_16(packet.data(), 6);
+        m_input.right_axes.y = little_endian_read_16(packet.data(), 8);
+        m_input.left_trigger = little_endian_read_16(packet.data(), 10);
+        m_input.right_trigger = little_endian_read_16(packet.data(), 12);
+        m_input.hat = (xbox_hat)packet[14];
+        m_input.buttons = little_endian_read_16(packet.data(), 15);
+        dump_controller(m_input);
+        break;
+    case 0x02:
+        info("Received Sys Main Menu report: %s\n", packet[2] ? "true" : "false");
+        break;
+    case 0x03:
+        warn1("This is an output report? Shouldn't be received.\n");
+        break;
+    case 0x04:
+        info("Received Battery report: %.1f%%\n", (float)packet[2] / 2.55f);
+        break;
+    }
+    // if(packet.size() > 3) {
+    //     uint16_t i = 0;
+    //     for(i; i < packet.size(); i++) {
+    //         info_cont("0x%02x ", packet[i]);
+    //         if(i % 4 == 3) {
+    //             info_cont1(" ");
+    //         }
+    //     }
+    //     info_cont1("\r");
+    // }
+    return true;
+}
+
+bool device::on_sdp_event_packet(uint16_t channel, std::span<uint8_t> packet) {
+    if(queried_device != this) {
+        return false;
+    }
+    uint8_t event = hci_event_packet_get_type(packet.data());
+
+    switch(event) {
+    case SDP_EVENT_QUERY_COMPLETE:{
+        queried_device = nullptr;
+        debug("Unset queried device %p\n", this);
+        if(m_hid_descriptor != nullptr) {
+            info1("Received HID descriptor:\n");
+            uint16_t i = 0;
+            for(i; i < m_hid_descriptor_len; i++) {
+                info_cont("0x%02x ", m_hid_descriptor[i]);
+                if(i % 16 == 15) {
+                    info_cont1("\n");
+                } else if(i % 4 == 3) {
+                    info_cont1(" ");
+                }
+            }
+            if(i % 16 != 15) {
+                info_cont1("\n");
             }
         }
-        info_cont1("\r");
+        break;
+    }
+    case SDP_EVENT_QUERY_RFCOMM_SERVICE:
+        break;
+    case SDP_EVENT_QUERY_ATTRIBUTE_BYTE:
+    case SDP_EVENT_QUERY_ATTRIBUTE_VALUE:
+        handle_sdp_attribute(channel, packet);
+        break;
+    case SDP_EVENT_QUERY_SERVICE_RECORD_HANDLE:
+        break;
+    default:
+        break;
     }
     return true;
+}
+
+void device::handle_sdp_attribute(uint16_t channel, std::span<uint8_t> packet) {
+    uint16_t length = sdp_event_query_attribute_byte_get_attribute_length(packet.data());
+    uint16_t offset = sdp_event_query_attribute_byte_get_data_offset(packet.data());
+    uint8_t data = sdp_event_query_attribute_byte_get_data(packet.data());
+    uint16_t attribute_id = sdp_event_query_attribute_byte_get_attribute_id(packet.data());
+    // info("device::handle_sdp_attribute:\n    attribute %s\n    %d/%d bytes\n    value 0x%02x\n",
+    //     bt_strattribute(attribute_id),
+    //     offset,
+    //     length,
+    //     data
+    // );
+    switch(attribute_id) {
+    case BLUETOOTH_ATTRIBUTE_HID_DESCRIPTOR_LIST:
+        if(m_hid_descriptor == nullptr) {
+            m_hid_descriptor_len = length > 0 ? length : 16;
+            m_hid_descriptor = (uint8_t*)malloc(m_hid_descriptor_len);
+        }
+        if(m_hid_descriptor_len < length) {
+            m_hid_descriptor_len = length;
+            m_hid_descriptor = (uint8_t*)realloc(m_hid_descriptor, m_hid_descriptor_len);
+        }
+        if(m_hid_descriptor_len <= offset) {
+            error("HID descriptor offset 0x%04x > length 0x%04x\n", offset, m_hid_descriptor_len);
+            break;
+        }
+        if(m_hid_descriptor == nullptr) {
+            panic("device::handle_sdp_attribute: Out of memory for hid_descriptor =/\n");
+        }
+        m_hid_descriptor[offset] = data;
+        break;
+    }
 }

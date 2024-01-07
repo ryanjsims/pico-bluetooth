@@ -12,6 +12,41 @@ union device_addr_t {
     };
 };
 
+enum class xbox_hat {
+    up = 0x01,
+    up_right = 0x02,
+    right = 0x03,
+    down_right = 0x04,
+    down = 0x05,
+    down_left = 0x06,
+    left = 0x07,
+    up_left = 0x08
+};
+
+enum class xbox_buttons: uint16_t {
+    a = 0x001,
+    b = 0x002,
+    x = 0x004,
+    y = 0x008,
+    left_bumper = 0x010,
+    right_bumper = 0x020,
+    select = 0x040,
+    start = 0x080,
+    left_joystick = 0x100,
+    right_joystick = 0x200,
+};
+
+struct axes_t {
+    uint16_t x, y;
+};
+
+struct controller_state_t {
+    axes_t left_axes, right_axes;
+    uint16_t left_trigger, right_trigger;
+    xbox_hat hat;
+    uint16_t buttons;
+};
+
 class device {
 public:
     enum class name {
@@ -141,10 +176,17 @@ private:
     name m_name_state;
     uint8_t m_name_retries;
     connection m_connection_state;
+    uint8_t* m_hid_descriptor;
+    size_t m_hid_descriptor_len;
+
+    controller_state_t m_input;
 
     void construct_from_inquiry_result(std::span<uint8_t> packet);
     void construct_from_connection_request(std::span<uint8_t> packet);
 
     bool on_hci_event_packet(uint16_t channel, std::span<uint8_t> packet);
     bool on_l2cap_data_packet(uint16_t channel, std::span<uint8_t> packet);
+    bool on_sdp_event_packet(uint16_t channel, std::span<uint8_t> packet);
+
+    void handle_sdp_attribute(uint16_t channel, std::span<uint8_t> packet);
 };
